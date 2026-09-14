@@ -1,0 +1,14 @@
+.venv/
+.build-env/
+build/
+dist/
+release/
+__pycache__/
+*.pyc
+*.spec
+*.exe
+*.zip
+Extracted Images/
+*.xpz
+*.xpr
+*.xbx
