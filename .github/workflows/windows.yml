@@ -40,5 +40,6 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: XPZ-Image-Extractor-Windows-x64
           path: release/

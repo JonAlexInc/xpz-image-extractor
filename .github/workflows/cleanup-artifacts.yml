@@ -1,0 +1,80 @@
+name: Clean up build artifacts
+on:
+  workflow_run:
+    workflows: ["Windows tests and build"]
+    types: [completed]
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview deletions without removing artifacts
+        type: boolean
+        default: false
+permissions:
+  actions: write
+concurrency:
+  group: cleanup-build-artifacts
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep the latest successful artifact of each type
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+        with:
+          script: |
+            async function cleanupArtifacts(github, context, core, dryRun) {
+              const repo = context.repo;
+              const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo,
+                { ...repo, per_page: 100 });
+              const runs = new Map();
+              for (const artifact of artifacts) {
+                const id = artifact.workflow_run?.id;
+                if (!id || runs.has(id)) continue;
+                try {
+                  const response = await github.rest.actions.getWorkflowRun({ ...repo, run_id: id });
+                  runs.set(id, response.data);
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                  runs.set(id, null);
+                  core.warning(`Preserving artifacts for unavailable run ${id}.`);
+                }
+              }
+              const completed = artifacts.filter(a => runs.get(a.workflow_run?.id)?.status === 'completed');
+              const groups = new Map();
+              for (const artifact of completed.filter(a => !a.expired)) {
+                if (!groups.has(artifact.name)) groups.set(artifact.name, []);
+                groups.get(artifact.name).push(artifact);
+              }
+              const keep = new Set();
+              for (const group of groups.values()) {
+                group.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+                const latest = group.find(a => runs.get(a.workflow_run.id)?.conclusion === 'success') || group[0];
+                keep.add(latest.id);
+              }
+              const candidates = completed.filter(a => a.expired || !keep.has(a.id));
+              let deletedBytes = 0;
+              let deletedCount = 0;
+              for (const artifact of candidates) {
+                core.info(`${dryRun ? 'Would delete' : 'Deleting'} artifact ${artifact.id}: ${artifact.name}`);
+                if (!dryRun) {
+                  try {
+                    await github.rest.actions.deleteArtifact({ ...repo, artifact_id: artifact.id });
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
+                }
+                deletedBytes += artifact.size_in_bytes;
+                deletedCount += 1;
+              }
+              await core.summary.addHeading('Artifact cleanup')
+                .addRaw(`${dryRun ? 'Dry run: would remove' : 'Removed'} ${deletedCount} superseded/expired artifacts (${(deletedBytes / 2 ** 20).toFixed(1)} MiB). `)
+                .addRaw('The newest successful copy of each name is retained while available; in-progress and unavailable runs are preserved. New uploads expire after 7 days.\n')
+                .write();
+              return { deletedCount, deletedBytes, keptIds: [...keep] };
+            }
+            return await cleanupArtifacts(github, context, core, process.env.DRY_RUN === 'true');
